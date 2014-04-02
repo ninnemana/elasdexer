@@ -37,22 +37,28 @@ func main() {
 	flag.Parse()
 	api.Domain = *DOMAIN
 	api.Port = "9200"
-	// go func() {
-	// 	err := indexCategories()
-	// 	if err != nil {
-	// 		log.Println(err)
-	// 	}
-	// }()
-	// if e := indexParts(); e != nil {
-	// 	log.Println(e)
-	// }
-	search("ball mount")
+
+	resp := indexCategories()
+	log.Println(resp.Errors)
+
+	err := indexParts()
+	log.Println(err)
+
+	qry := map[string]interface{}{
+		"query": map[string]interface{}{
+			"term": map[string]string{"query": "ball mount"},
+		},
+	}
+	search(qry)
 }
 
-func search(query string) {
-	res, e := core.SearchUri("curt", "", query, "", 0)
-	for _, hit := range res.Hits.Hits {
-		log.Println(string(hit.Source))
+func search(query map[string]interface{}) {
+	if res, e := core.SearchUri("curt", "", query); e == nil {
+		for _, hit := range res.Hits.Hits {
+			if js, err := hit.Source.MarshalJSON(); err == nil {
+				log.Println(string(js))
+			}
+		}
 	}
 }
 
@@ -77,12 +83,12 @@ func indexCategories() IndexResponse {
 			failedTransactions++
 		} else {
 			if cat.CategoryId > 0 {
-				exists, err := core.Exists(true, "curt", "part", strconv.Itoa(cat.CategoryId))
+				exists, err := core.Exists("curt", "category", strconv.Itoa(cat.CategoryId), nil)
 				if exists && err == nil {
 					updateCount++
 				}
 				// add single struct entity
-				core.Index(true, "curt", "category", strconv.Itoa(cat.CategoryId), cat)
+				core.Index("curt", "category", strconv.Itoa(cat.CategoryId), nil, cat)
 				successfulTransactions++
 			}
 		}
@@ -147,12 +153,12 @@ func indexParts() error {
 			failedTransactions++
 		} else {
 			if part.PartId > 0 {
-				exists, err := core.Exists(true, "curt", "part", strconv.Itoa(part.PartId))
+				exists, err := core.Exists("curt", "part", strconv.Itoa(part.PartId), nil)
 				if exists && err == nil {
 					updateCount++
 				}
 				// add single struct entity
-				core.Index(true, "curt", "part", strconv.Itoa(part.PartId), part)
+				core.Index("curt", "part", strconv.Itoa(part.PartId), nil, part)
 				successfulTransactions++
 			}
 		}
