@@ -3,11 +3,11 @@ package main
 import (
 	"encoding/json"
 	"flag"
-	"github.com/mattbaird/elastigo/api"
-	"github.com/mattbaird/elastigo/core"
+	"github.com/mattbaird/elastigo/lib"
+
 	"github.com/ziutek/mymysql/mysql"
 	_ "github.com/ziutek/mymysql/native" // Native engine
-	"io/ioutil"
+
 	"log"
 	"net/http"
 	"net/url"
@@ -16,12 +16,15 @@ import (
 )
 
 var (
-	API_KEY = flag.String("key", "", "API Key")
-	DOMAIN  = flag.String("domain", "", "ElasticSearch IP")
-	DB_HOST = flag.String("db_host", "", "Database IP")
-	DB_USER = flag.String("db_user", "", "Database User")
-	DB_PASS = flag.String("db_pass", "", "Database Password")
-	DB_NAME = flag.String("db_name", "", "Database Name")
+	API_KEY  = flag.String("key", "", "API Key")
+	DOMAIN   = flag.String("domain", "127.0.0.1", "ElasticSearch IP")
+	PORT     = flag.String("port", "9200", "ElasticSearch Port")
+	USERNAME = flag.String("username", "", "ElasticSearch Username")
+	PASSWORD = flag.String("password", "", "ElasticSearch Password")
+	DB_HOST  = flag.String("db_host", "127.0.0.1", "Database IP")
+	DB_USER  = flag.String("db_user", "", "Database User")
+	DB_PASS  = flag.String("db_pass", "", "Database Password")
+	DB_NAME  = flag.String("db_name", "", "Database Name")
 )
 
 type IndexResponse struct {
@@ -35,8 +38,6 @@ type IndexResponse struct {
 func main() {
 
 	flag.Parse()
-	api.Domain = *DOMAIN
-	api.Port = "9200"
 
 	resp := indexCategories()
 	log.Println(resp.Errors)
@@ -46,20 +47,40 @@ func main() {
 
 	qry := map[string]interface{}{
 		"query": map[string]interface{}{
-			"term": map[string]string{"query": "ball mount"},
+			"query_string": map[string]string{"query": "ball mount"},
 		},
 	}
 	search(qry)
 }
 
+func newEsConnection() *elastigo.Conn {
+	con := elastigo.NewConn()
+	con.Domain = *DOMAIN
+	con.Port = *PORT
+	con.Username = *USERNAME
+	con.Password = *PASSWORD
+
+	return con
+}
+
 func search(query map[string]interface{}) {
-	if res, e := core.SearchUri("curt", "", query); e == nil {
-		for _, hit := range res.Hits.Hits {
-			if js, err := hit.Source.MarshalJSON(); err == nil {
-				log.Println(string(js))
-			}
-		}
+
+	con := newEsConnection()
+
+	var args map[string]interface{}
+	res, e := con.Search("curt", "", args, query)
+	if e != nil {
+		log.Println(e.Error())
+		return
 	}
+
+	js, err := json.Marshal(res.Hits.Hits)
+	if err != nil {
+		log.Println(err.Error())
+		return
+	}
+
+	log.Println(string(js))
 }
 
 func indexCategories() IndexResponse {
@@ -76,22 +97,32 @@ func indexCategories() IndexResponse {
 	successfulTransactions := 0
 	failedTransactions := 0
 	updateCount := 0
+	con := newEsConnection()
+	ch := make(chan int)
 	for _, i := range ids {
-		cat, err := getCategory(i)
-		if err != nil {
-			errors = append(errors, err.Error())
-			failedTransactions++
-		} else {
-			if cat.CategoryId > 0 {
-				exists, err := core.Exists("curt", "category", strconv.Itoa(cat.CategoryId), nil)
-				if exists && err == nil {
-					updateCount++
+		go func(catID int) {
+			cat, err := getCategory(catID)
+			if err != nil {
+				errors = append(errors, err.Error())
+				failedTransactions++
+			} else {
+				if cat.CategoryId > 0 {
+					baseResponse, err := con.Exists("curt", "category", strconv.Itoa(cat.CategoryId), nil)
+					if baseResponse.Exists && err == nil {
+						updateCount++
+					}
+					// add single struct entity
+					con.Index("curt", "category", strconv.Itoa(cat.CategoryId), nil, cat)
+					successfulTransactions++
+					log.Printf("Indexed Category: %s\n", cat.Title)
 				}
-				// add single struct entity
-				core.Index("curt", "category", strconv.Itoa(cat.CategoryId), nil, cat)
-				successfulTransactions++
 			}
-		}
+			ch <- 0
+		}(i)
+	}
+
+	for _, _ = range ids {
+		<-ch
 	}
 
 	resp = IndexResponse{
@@ -110,10 +141,11 @@ func getCategory(catID int) (c Category, err error) {
 	if err != nil {
 		return
 	}
-	buf, err := ioutil.ReadAll(res.Body)
-	res.Body.Close()
+	defer res.Body.Close()
 
-	err = json.Unmarshal(buf, &c)
+	decoder := json.NewDecoder(res.Body)
+	err = decoder.Decode(&c)
+
 	return
 }
 
@@ -146,31 +178,49 @@ func indexParts() error {
 	successfulTransactions := 0
 	failedTransactions := 0
 	updateCount := 0
-	for _, n := range nums {
-		part, err := getPart(n)
-		if err != nil {
-			errors = append(errors, err.Error())
-			failedTransactions++
-		} else {
-			if part.PartId > 0 {
-				exists, err := core.Exists("curt", "part", strconv.Itoa(part.PartId), nil)
-				if exists && err == nil {
-					updateCount++
+
+	con := newEsConnection()
+	segments := (len(nums) - 1) / 5
+
+	for i := 0; i < segments; i++ {
+		segmentNumbers := nums[(i * 5) : (i*5)+5]
+		ch := make(chan int)
+		for _, n := range segmentNumbers {
+			go func(id int) {
+				part, err := getPart(id)
+				if err != nil {
+					log.Println(err)
+					errors = append(errors, err.Error())
+					failedTransactions++
+				} else {
+					if part.PartId > 0 {
+						baseResponse, err := con.Exists("curt", "part", strconv.Itoa(part.PartId), nil)
+						if baseResponse.Exists && err == nil {
+							log.Println(err)
+							updateCount++
+						}
+						// add single struct entity
+						con.Index("curt", "part", strconv.Itoa(part.PartId), nil, part)
+						successfulTransactions++
+						log.Printf("Indexed Part: %s\n", part.ShortDesc)
+					}
 				}
-				// add single struct entity
-				core.Index("curt", "part", strconv.Itoa(part.PartId), nil, part)
-				successfulTransactions++
-			}
+				ch <- 0
+			}(n)
+		}
+
+		for _, _ = range segmentNumbers {
+			<-ch
 		}
 	}
 
 	for _, e := range errors {
 		log.Println(e)
 	}
-	log.Printf("Successful Part Transactions: %d", successfulTransactions)
-	log.Printf("Failed Part Transactions: %d", failedTransactions)
-	log.Printf("Total Part Records Updated: %d", updateCount)
-	log.Printf("Total Part Records Insert: %d", successfulTransactions-updateCount)
+	log.Printf("Successful Part Transactions: %d\n", successfulTransactions)
+	log.Printf("Failed Part Transactions: %d\n", failedTransactions)
+	log.Printf("Total Part Records Updated: %d\n", updateCount)
+	log.Printf("Total Part Records Insert: %d\n", successfulTransactions-updateCount)
 	return nil
 }
 
@@ -179,10 +229,10 @@ func getPart(partID int) (p Part, err error) {
 	if err != nil {
 		return
 	}
-	buf, err := ioutil.ReadAll(res.Body)
-	res.Body.Close()
+	defer res.Body.Close()
+	decoder := json.NewDecoder(res.Body)
+	err = decoder.Decode(&p)
 
-	err = json.Unmarshal(buf, &p)
 	return
 }
 
