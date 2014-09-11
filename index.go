@@ -70,13 +70,11 @@ func search(query map[string]interface{}) {
 	var args map[string]interface{}
 	res, e := con.Search("curt", "", args, query)
 	if e != nil {
-		log.Println(e.Error())
 		return
 	}
 
 	js, err := json.Marshal(res.Hits.Hits)
 	if err != nil {
-		log.Println(err.Error())
 		return
 	}
 
@@ -109,12 +107,12 @@ func indexCategories() IndexResponse {
 				if cat.CategoryId > 0 {
 					baseResponse, err := con.Exists("curt", "category", strconv.Itoa(cat.CategoryId), nil)
 					if baseResponse.Exists && err == nil {
+						con.Update("curt", "category", strconv.Itoa(cat.CategoryId), nil, cat)
 						updateCount++
 					}
 					// add single struct entity
 					con.Index("curt", "category", strconv.Itoa(cat.CategoryId), nil, cat)
 					successfulTransactions++
-					log.Printf("Indexed Category: %s\n", cat.Title)
 				}
 			}
 			ch <- 0
@@ -189,20 +187,18 @@ func indexParts() error {
 			go func(id int) {
 				part, err := getPart(id)
 				if err != nil {
-					log.Println(err)
 					errors = append(errors, err.Error())
 					failedTransactions++
 				} else {
-					if part.PartId > 0 {
+					if part.PartId > 0 && part.Status > 0 {
 						baseResponse, err := con.Exists("curt", "part", strconv.Itoa(part.PartId), nil)
 						if baseResponse.Exists && err == nil {
-							log.Println(err)
+							con.Update("curt", "part", strconv.Itoa(part.PartId), nil, part)
 							updateCount++
 						}
 						// add single struct entity
 						con.Index("curt", "part", strconv.Itoa(part.PartId), nil, part)
 						successfulTransactions++
-						log.Printf("Indexed Part: %s\n", part.ShortDesc)
 					}
 				}
 				ch <- 0
@@ -214,9 +210,6 @@ func indexParts() error {
 		}
 	}
 
-	for _, e := range errors {
-		log.Println(e)
-	}
 	log.Printf("Successful Part Transactions: %d\n", successfulTransactions)
 	log.Printf("Failed Part Transactions: %d\n", failedTransactions)
 	log.Printf("Total Part Records Updated: %d\n", updateCount)
@@ -262,6 +255,7 @@ type Part struct {
 	InstallSheet                            *url.URL
 	Attributes                              []Attribute
 	VehicleAttributes                       []string
+	Vehicles                                []Vehicle
 	Content                                 []Content
 	Pricing                                 []Pricing
 	Reviews                                 []Review
@@ -271,6 +265,13 @@ type Part struct {
 	Videos                                  []PartVideo
 	Packages                                []Package
 	Customer                                CustomerPart
+}
+
+type Vehicle struct {
+	ID                    int
+	Year                  int
+	Make, Model, Submodel string
+	Configuration         []string
 }
 
 type PagedParts struct {
